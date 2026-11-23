@@ -1,0 +1,68 @@
+# Big PSP games (over 1 GB unpacked) can't be unpacked inside a browser, so when one is uploaded
+# as .7z / .zip (whole or in parts), this turns it into .cso parts that the emulator reads directly.
+# It replaces the archive parts of those games with .cso parts, so it only runs when started by hand:
+# Actions tab -> "Make big PSP games playable (.cso)" -> "Run workflow".
+# (To run it automatically after every upload to rom/PSP/, add under "on:":  push: { branches: [main], paths: ["rom/PSP/**"] })
+name: Make big PSP games playable (.cso)
+# Also converts PS2 games uploaded as .7z / .zip (the PS2 player needs the plain disc).
+
+on:
+  workflow_dispatch:
+    inputs:
+      game:
+        description: "Only this game folder inside rom/PSP/ or rom/PS2/ (leave empty for all)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write   # commit the .cso parts
+  pages: write      # rebuild the site afterwards
+
+concurrency:
+  group: psp-cso
+  cancel-in-progress: false
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            rom/PSP
+            rom/PS2
+            .github
+
+      - name: Install 7-Zip
+        run: command -v 7z || (sudo apt-get update -q && sudo apt-get install -y -q p7zip-full)
+
+      - name: Convert big PSP games and zipped PS2 games
+        id: convert
+        env:
+          ONLY_GAME: ${{ inputs.game }}
+        run: |
+          python3 .github/scripts/psp_to_cso.py . > converted.txt
+          cat converted.txt
+          echo "count=$(grep -c . converted.txt || true)" >> "$GITHUB_OUTPUT"
+
+      - name: Commit the .cso parts (one game per commit)
+        if: steps.convert.outputs.count != '0'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          while IFS= read -r folder; do
+            [ -n "$folder" ] || continue
+            git add -A -- "$folder"
+            git commit -q -m "Convert $(basename "$folder") so it plays in the browser"
+            for i in 1 2 3 4; do
+              git pull -q --rebase origin main && git push -q origin HEAD:main && break
+              sleep $((i * 10))
+            done
+          done < converted.txt
+
+      - name: Rebuild the site
+        if: steps.convert.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X POST "repos/${{ github.repository }}/pages/builds" || echo "Pages will rebuild on the next change."

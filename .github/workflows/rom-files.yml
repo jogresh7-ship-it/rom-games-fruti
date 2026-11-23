@@ -1,0 +1,42 @@
+# Rewrites rom/files.json (every file in rom/ with its size). The launcher asks GitHub for the list
+# of games, but GitHub only answers 60 times an hour per person; when that limit is reached the
+# launcher reads this file instead. It never touches games.
+# Runs only when started by hand: Actions tab -> "Update the game file list" -> "Run workflow".
+# (To run it after every upload, add under "on:":  push: { branches: [main], paths: ["rom/**", "!rom/files.json"] })
+name: Update the game file list
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rom-files
+  cancel-in-progress: true
+
+jobs:
+  list:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          filter: blob:none        # file names and sizes only; no need to download the games
+          sparse-checkout: .github
+
+      - name: Commit an up-to-date rom/files.json
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for i in 1 2 3 4; do
+            git fetch -q --filter=blob:none origin main
+            git reset -q --soft origin/main
+            mkdir -p rom
+            python3 .github/scripts/rom_files.py origin/main > rom/files.json
+            git add --sparse -f rom/files.json
+            if git diff --cached --quiet; then echo "The list is already up to date."; exit 0; fi
+            git commit -q -m "Update the game file list"
+            git push -q origin HEAD:main && exit 0
+            sleep $((i * 5))
+          done
+          exit 1
